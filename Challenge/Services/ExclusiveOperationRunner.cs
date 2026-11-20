@@ -1,7 +1,7 @@
 using System;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using Challenge.Logging;
 using Challenge.Utilities;
 
 namespace Challenge.Services
@@ -13,7 +13,13 @@ namespace Challenge.Services
     /// </summary>
     internal sealed class ExclusiveOperationRunner
     {
+        private readonly ILogger _logger;
         private CancellationTokenSource _current;
+
+        public ExclusiveOperationRunner(ILogger logger = null)
+        {
+            _logger = logger ?? NullLogger.Instance;
+        }
 
         public async Task<OperationOutcome<T>> RunAsync<T>(Func<CancellationToken, Task<T>> operation)
         {
@@ -46,7 +52,7 @@ namespace Challenge.Services
                     return OperationOutcome<T>.Failure(ex.Message);
                 }
 
-                Trace.TraceError(ex.ToString());
+                _logger.Error("Unexpected error while loading data", ex);
                 return OperationOutcome<T>.Failure(Constants.ServiceErrorMsg + ex.Message);
             }
             finally
@@ -60,7 +66,6 @@ namespace Challenge.Services
             }
         }
 
-        /// <summary>Cancels whatever is running; its outcome will be reported as superseded.</summary>
         public void Cancel()
         {
             var running = _current;
@@ -75,26 +80,5 @@ namespace Challenge.Services
         {
             return cts.IsCancellationRequested || !ReferenceEquals(_current, cts);
         }
-    }
-
-    internal sealed class OperationOutcome<T>
-    {
-        private OperationOutcome(bool isSuperseded, T value, string error)
-        {
-            IsSuperseded = isSuperseded;
-            Value = value;
-            Error = error;
-        }
-
-        public bool IsSuperseded { get; }
-
-        public T Value { get; }
-        public string Error { get; }
-
-        public static OperationOutcome<T> Success(T value) => new OperationOutcome<T>(false, value, null);
-
-        public static OperationOutcome<T> Failure(string error) => new OperationOutcome<T>(false, default(T), error);
-
-        public static OperationOutcome<T> Superseded() => new OperationOutcome<T>(true, default(T), null);
     }
 }

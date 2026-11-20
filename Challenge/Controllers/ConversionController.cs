@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Net;
@@ -8,6 +9,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Challenge.Controllers.Interfaces;
+using Challenge.Logging;
 using Challenge.Models;
 using Challenge.Models.Api.FrankfurterAPI;
 using Challenge.Utilities;
@@ -15,7 +17,6 @@ using Newtonsoft.Json;
 
 namespace Challenge.Controllers
 {
-    /// <summary>Talks to the Frankfurter API (v2) and turns its JSON into domain objects.</summary>
     public class ConversionController : IConversionController
     {
         private const string Host = "api.frankfurter.dev";
@@ -25,13 +26,17 @@ namespace Challenge.Controllers
         private static readonly Regex CurrencyCodePattern = new Regex("^[A-Za-z]{3}$", RegexOptions.Compiled);
         private static readonly Regex ProvidersPattern = new Regex("^[A-Za-z0-9._,]+$", RegexOptions.Compiled);
 
-        // HttpClient is designed to be shared; creating one per request exhausts sockets.
-        private static readonly HttpClient SharedHttpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        
+        private static readonly HttpClient HttpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+
+        /// <summary>How much of a response body goes into the log.</summary>
+        private const int LoggedBodyLength = 300;
 
         private readonly HttpClient _httpClient;
         private readonly string _providers;
+        private readonly ILogger _logger;
 
-        public ConversionController() : this(SharedHttpClient)
+        public ConversionController(ILogger logger = null) : this(HttpClient, null, logger)
         {
         }
 
@@ -40,9 +45,11 @@ namespace Challenge.Controllers
         /// null (default) uses Frankfurter's blend across all providers. "ecb" pins the European Central Bank's
         /// reference rates, which is what the v1 API served.
         /// </param>
-        public ConversionController(HttpClient httpClient, string providers = null)
+        /// <param name="logger">Receives every request and response. Nothing is logged when null.</param>
+        public ConversionController(HttpClient httpClient, string providers = null, ILogger logger = null)
         {
             _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+            _logger = (logger ?? NullLogger.Instance).ForCategory("FrankfurterApi");
 
             if (!string.IsNullOrWhiteSpace(providers) && !ProvidersPattern.IsMatch(providers))
             {
@@ -108,8 +115,6 @@ namespace Challenge.Controllers
                 return new DailyRate[0];
             }
 
-            // One row per day and quote currency. We asked for a single quote, but filter anyway so an
-            // unexpected extra row can never be mistaken for the target currency.
             return rows
                 .Where(row => row != null && string.Equals(row.Quote, targetCode, StringComparison.OrdinalIgnoreCase))
                 .Select(ToDailyRate)
@@ -120,49 +125,65 @@ namespace Challenge.Controllers
         private async Task<T> GetAsync<T>(string path, string query, bool notFoundMeansEmpty, CancellationToken cancellationToken) where T : class
         {
             var uri = new Uri("https://" + Host + "/" + ApiVersion + "/" + path + (query == null ? string.Empty : "?" + query));
+            var stopwatch = Stopwatch.StartNew();
+            _logger.Info("Request: GET " + uri);
 
             try
             {
                 using (var response = await _httpClient.GetAsync(uri, cancellationToken).ConfigureAwait(false))
                 {
+                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false) ?? string.Empty;
+                    _logger.Info(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "Response: {0} {1} for GET {2} in {3} ms, {4} chars: {5}",
+                        (int)response.StatusCode, response.ReasonPhrase, uri.PathAndQuery,
+                        stopwatch.ElapsedMilliseconds, body.Length, Shorten(body)));
+
                     if (notFoundMeansEmpty && response.StatusCode == HttpStatusCode.NotFound)
                     {
+                        _logger.Info("No data for GET " + uri.PathAndQuery + "; treating it as an empty result");
                         return null;
                     }
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        var detail = await ReadErrorMessageAsync(response).ConfigureAwait(false);
-                        throw new ExchangeRateException(
+                        var detail = ParseErrorMessage(body);
+                        var error = new ExchangeRateException(
                             "The exchange rate service returned an error (" + (int)response.StatusCode + " " + response.ReasonPhrase + ")"
                             + (string.IsNullOrWhiteSpace(detail) ? "." : ": " + detail));
+                        _logger.Warning("GET " + uri.PathAndQuery + " failed: " + error.Message);
+                        throw error;
                     }
 
-                    var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    return JsonConvert.DeserializeObject<T>(json);
+                    return JsonConvert.DeserializeObject<T>(body);
                 }
             }
             catch (HttpRequestException ex)
             {
+                _logger.Error("GET " + uri + " could not reach the server after " + stopwatch.ElapsedMilliseconds + " ms", ex);
                 throw new ExchangeRateException("The exchange rate service could not be reached. Please check your internet connection.", ex);
             }
             catch (JsonException ex)
             {
+                _logger.Error("GET " + uri.PathAndQuery + " returned JSON that could not be read", ex);
                 throw new ExchangeRateException("The exchange rate service returned an unexpected response.", ex);
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                // HttpClient reports its own timeout as a cancellation; the caller did not cancel anything.
+            {           
+                _logger.Error("GET " + uri + " timed out after " + stopwatch.ElapsedMilliseconds + " ms", ex);
                 throw new ExchangeRateException("The exchange rate service did not respond in time.", ex);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.Info("GET " + uri.PathAndQuery + " cancelled after " + stopwatch.ElapsedMilliseconds + " ms (superseded by a newer request)");
+                throw;
             }
         }
 
-        /// <summary>v2 error bodies look like {"status":422,"message":"invalid currency: ABC"}. Returns null if there is none.</summary>
-        private static async Task<string> ReadErrorMessageAsync(HttpResponseMessage response)
+        private static string ParseErrorMessage(string body)
         {
             try
             {
-                var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var error = JsonConvert.DeserializeObject<ErrorDto>(body);
                 return error == null ? null : error.Message;
             }
@@ -171,8 +192,15 @@ namespace Challenge.Controllers
                 return null;
             }
         }
+        
+        private static string Shorten(string body)
+        {
+            var oneLine = body.Replace("\r", " ").Replace("\n", " ");
+            return oneLine.Length <= LoggedBodyLength
+                ? oneLine
+                : oneLine.Substring(0, LoggedBodyLength) + "... (" + (oneLine.Length - LoggedBodyLength) + " more chars)";
+        }
 
-        /// <summary>Builds the query string; the provider pin (if any) is appended to every request.</summary>
         private string BuildQuery(params string[] parameters)
         {
             var all = parameters.ToList();

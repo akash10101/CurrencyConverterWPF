@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Configuration;
 using System.Globalization;
@@ -6,6 +7,7 @@ using System.Windows.Markup;
 using Challenge.Caching;
 using Challenge.Controllers;
 using Challenge.Controllers.Interfaces;
+using Challenge.Logging;
 using Challenge.Models;
 using Challenge.Services;
 using Challenge.Services.Interfaces;
@@ -15,9 +17,15 @@ namespace Challenge
 {
     public partial class App : Application
     {
+        private const string MinimumLogLevelKey = "Logging.MinimumLevel";
+
         protected override void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
+
+            var logger = CreateLogger();
+            new CrashLogger(logger).Attach(this);
+            logger.Info("Application started, version " + typeof(App).Assembly.GetName().Version);
 
             // WPF bindings format numbers and dates as en-US unless told otherwise. Use the user's culture
             // so that what is displayed matches how the amount is parsed.
@@ -25,25 +33,39 @@ namespace Challenge
                 typeof(FrameworkElement),
                 new FrameworkPropertyMetadata(XmlLanguage.GetLanguage(CultureInfo.CurrentCulture.IetfLanguageTag)));
 
-            // Composition root: the only place that knows which implementations are used.
-            IConversionController controller = CreateController();
+            IConversionController controller = CreateController(logger);
             IExchangeRateService service = new ExchangeRateService(controller);
-            var viewModel = new MainViewModel(service);
+            var viewModel = new MainViewModel(service, logger: logger);
 
             var window = new MainWindow(viewModel);
             window.Show();
 
-            // Start the first load once the window is up. InitializeAsync reports its own errors in the
-            // status line, so nothing needs to be awaited here.
             _ = viewModel.InitializeAsync();
         }
 
-        /// <summary>The HTTP controller, wrapped in a cache that is configured in App.config.</summary>
-        private static IConversionController CreateController()
+        /// <summary>
+        /// Daily log files in %LOCALAPPDATA%\CurrencyConverter\Logs; the level is set in App.config.
+        /// </summary>
+        private static ILogger CreateLogger()
         {
-            var settings = CacheSettings.Load(ConfigurationManager.AppSettings);
+            LogLevel minimumLevel;
+            if (!Enum.TryParse(ConfigurationManager.AppSettings[MinimumLogLevelKey], true, out minimumLevel))
+            {
+                minimumLevel = LogLevel.Info;
+            }
+
+            return new FileLogger(FileLogger.DefaultDirectory, minimumLevel);
+        }
+
+        /// <summary>
+        /// The HTTP controller, wrapped in a cache that is configured in App.config.
+        /// </summary>
+        private static IConversionController CreateController(ILogger logger)
+        {
+            var settings = CacheSettings.Load(ConfigurationManager.AppSettings, logger);
+            logger.Info("Cache settings in use: " + settings);
             var cache = new QueryCache<HistoricRatesQuery, IReadOnlyList<DailyRate>>(settings.CreateEvictionStrategy());
-            return new CachedConversionController(new ConversionController(), cache);
+            return new CachedConversionController(new ConversionController(logger), cache);
         }
     }
 }

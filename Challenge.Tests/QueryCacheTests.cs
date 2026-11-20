@@ -9,16 +9,6 @@ namespace Challenge.Tests
     [TestClass]
     public class QueryCacheTests
     {
-        private sealed class FakeClock
-        {
-            public DateTime UtcNow = new DateTime(2025, 1, 1, 12, 0, 0, DateTimeKind.Utc);
-
-            public void Advance(TimeSpan span)
-            {
-                UtcNow = UtcNow + span;
-            }
-        }
-
         private static QueryCache<string, int> TimeBasedCache(FakeClock clock, int maxAgeMinutes)
         {
             return new QueryCache<string, int>(new TimeBasedEvictionStrategy(TimeSpan.FromMinutes(maxAgeMinutes)), () => clock.UtcNow);

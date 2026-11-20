@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Specialized;
+using System.Linq;
 using Challenge.Caching;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -38,6 +39,46 @@ namespace Challenge.Tests
             Assert.AreEqual(CacheSettings.DefaultMaxAgeMinutes, settings.MaxAgeMinutes);
             Assert.AreEqual(CacheSettings.DefaultMaxElements, settings.MaxElements);
             Assert.IsInstanceOfType(settings.CreateEvictionStrategy(), typeof(TimeBasedEvictionStrategy));
+        }
+
+        [TestMethod]
+        public void InvalidValues_AreLoggedAsWarnings()
+        {
+            var logger = new RecordingLogger();
+
+            CacheSettings.Load(
+                new NameValueCollection
+                {
+                    { CacheSettings.StrategyKey, "Fastest" },
+                    { CacheSettings.MaxAgeMinutesKey, "abc" },
+                    { CacheSettings.MaxElementsKey, "5" },
+                },
+                logger);
+
+            CollectionAssert.AreEqual(
+                new[]
+                {
+                    "Warning [CacheSettings] Invalid value 'Fastest' for Cache.EvictionStrategy in App.config; using TimeBased",
+                    "Warning [CacheSettings] Invalid value 'abc' for Cache.MaxAgeMinutes in App.config; using 10"
+                },
+                logger.Lines.ToArray());
+        }
+
+        [TestMethod]
+        public void ValidOrMissingValues_LogNothing()
+        {
+            var logger = new RecordingLogger();
+
+            CacheSettings.Load(new NameValueCollection { { CacheSettings.MaxElementsKey, "5" } }, logger);
+
+            Assert.AreEqual(0, logger.Lines.Count);
+        }
+
+        [TestMethod]
+        public void ToString_DescribesTheSettingsOfTheChosenStrategy()
+        {
+            Assert.AreEqual("TimeBased (entries expire after 10 min)", new CacheSettings(EvictionStrategyKind.TimeBased, 10, 20).ToString());
+            Assert.AreEqual("SizeBased (at most 20 entries)", new CacheSettings(EvictionStrategyKind.SizeBased, 10, 20).ToString());
         }
 
         [TestMethod]

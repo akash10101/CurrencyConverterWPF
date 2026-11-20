@@ -1,19 +1,10 @@
 using System;
 using System.Collections.Specialized;
-using System.Diagnostics;
 using System.Globalization;
+using Challenge.Logging;
 
 namespace Challenge.Caching
 {
-    public enum EvictionStrategyKind
-    {
-        /// <summary>Remove entries older than MAX_AGE minutes.</summary>
-        TimeBased,
-
-        /// <summary>Keep at most MAX_ELEMENTS entries, dropping the oldest.</summary>
-        SizeBased
-    }
-
     /// <summary>The cache configuration, read from the &lt;appSettings&gt; section of App.config.</summary>
     public sealed class CacheSettings
     {
@@ -41,15 +32,26 @@ namespace Challenge.Caching
         public int MaxElements { get; }
 
         /// <summary>
-        /// Reads the settings. A missing or invalid value falls back to its default (and is traced), so a typo in
-        /// the config file degrades to sensible behaviour instead of preventing the application from starting.
+        /// Reads the settings. A missing or invalid value falls back to its default (and an invalid one is logged as
+        /// a warning), so a typo in the config file degrades to sensible behaviour instead of preventing the
+        /// application from starting.
         /// </summary>
-        public static CacheSettings Load(NameValueCollection appSettings)
+        public static CacheSettings Load(NameValueCollection appSettings, ILogger logger = null)
         {
+            logger = (logger ?? NullLogger.Instance).ForCategory(nameof(CacheSettings));
+
             return new CacheSettings(
-                ReadStrategy(appSettings),
-                ReadPositiveInt(appSettings, MaxAgeMinutesKey, DefaultMaxAgeMinutes),
-                ReadPositiveInt(appSettings, MaxElementsKey, DefaultMaxElements));
+                ReadStrategy(appSettings, logger),
+                ReadPositiveInt(appSettings, MaxAgeMinutesKey, DefaultMaxAgeMinutes, logger),
+                ReadPositiveInt(appSettings, MaxElementsKey, DefaultMaxElements, logger));
+        }
+
+        /// <summary>The settings that matter for the chosen strategy, for the log.</summary>
+        public override string ToString()
+        {
+            return Strategy == EvictionStrategyKind.TimeBased
+                ? Strategy + " (entries expire after " + MaxAgeMinutes + " min)"
+                : Strategy + " (at most " + MaxElements + " entries)";
         }
 
         public IEvictionStrategy CreateEvictionStrategy()
@@ -65,7 +67,7 @@ namespace Challenge.Caching
             }
         }
 
-        private static EvictionStrategyKind ReadStrategy(NameValueCollection appSettings)
+        private static EvictionStrategyKind ReadStrategy(NameValueCollection appSettings, ILogger logger)
         {
             var text = appSettings?[StrategyKey];
             if (string.IsNullOrWhiteSpace(text))
@@ -79,11 +81,11 @@ namespace Challenge.Caching
                 return strategy;
             }
 
-            Trace.TraceWarning("Invalid value '{0}' for {1}; using {2}.", text, StrategyKey, DefaultStrategy);
+            logger.Warning(InvalidValueMessage(text, StrategyKey, DefaultStrategy));
             return DefaultStrategy;
         }
 
-        private static int ReadPositiveInt(NameValueCollection appSettings, string key, int defaultValue)
+        private static int ReadPositiveInt(NameValueCollection appSettings, string key, int defaultValue, ILogger logger)
         {
             var text = appSettings?[key];
             if (string.IsNullOrWhiteSpace(text))
@@ -97,8 +99,13 @@ namespace Challenge.Caching
                 return value;
             }
 
-            Trace.TraceWarning("Invalid value '{0}' for {1}; using {2}.", text, key, defaultValue);
+            logger.Warning(InvalidValueMessage(text, key, defaultValue));
             return defaultValue;
+        }
+
+        private static string InvalidValueMessage(string text, string key, object defaultValue)
+        {
+            return string.Format(CultureInfo.InvariantCulture, "Invalid value '{0}' for {1} in App.config; using {2}", text, key, defaultValue);
         }
     }
 }

@@ -1,9 +1,11 @@
 using System;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Challenge.Controllers;
+using Challenge.Logging;
 using Challenge.Utilities;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -155,30 +157,49 @@ namespace Challenge.Tests
             Assert.IsNull(handler.LastRequestUri);
         }
 
-        private static ConversionController Create(HttpStatusCode status, string body, out StubHandler handler, string providers = null)
+        [TestMethod]
+        public async Task ApiCall_LogsTheRequestAndTheResponse()
         {
-            handler = new StubHandler(status, body);
-            return new ConversionController(new HttpClient(handler), providers);
+            var logger = new RecordingLogger();
+            var controller = Create(HttpStatusCode.OK, LatestJson, out _, logger: logger);
+
+            await controller.GetLatestRateAsync("EUR", "USD", CancellationToken.None);
+
+            Assert.AreEqual(2, logger.Lines.Count);
+            Assert.AreEqual("Info [FrankfurterApi] Request: GET https://api.frankfurter.dev/v2/rate/EUR/USD", logger.Lines[0]);
+            StringAssert.StartsWith(logger.Lines[1], "Info [FrankfurterApi] Response: 200 OK for GET /v2/rate/EUR/USD in ");
+            StringAssert.EndsWith(logger.Lines[1], LatestJson.Length + " chars: " + LatestJson);
         }
 
-        private sealed class StubHandler : HttpMessageHandler
+        [TestMethod]
+        public async Task ApiError_IsLoggedAsAWarning()
         {
-            private readonly HttpStatusCode _status;
-            private readonly string _body;
+            var logger = new RecordingLogger();
+            var controller = Create((HttpStatusCode)422, "{\"status\":422,\"message\":\"invalid currency: ABC\"}", out _, logger: logger);
 
-            public StubHandler(HttpStatusCode status, string body)
-            {
-                _status = status;
-                _body = body;
-            }
+            await Assert.ThrowsExceptionAsync<ExchangeRateException>(
+                () => controller.GetLatestRateAsync("EUR", "ABC", CancellationToken.None));
 
-            public Uri LastRequestUri { get; private set; }
+            Assert.IsTrue(logger.Contains("Warning [FrankfurterApi] GET /v2/rate/EUR/ABC failed:"));
+            Assert.IsTrue(logger.Contains("invalid currency: ABC"));
+        }
 
-            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-            {
-                LastRequestUri = request.RequestUri;
-                return Task.FromResult(new HttpResponseMessage(_status) { Content = new StringContent(_body) });
-            }
+        [TestMethod]
+        public async Task LongResponseBodies_AreShortenedInTheLog()
+        {
+            var logger = new RecordingLogger();
+            var longJson = "[" + string.Join(",", Enumerable.Repeat("{\"iso_code\":\"EUR\",\"name\":\"Euro\",\"type\":\"currency\"}", 20)) + "]";
+            var controller = Create(HttpStatusCode.OK, longJson, out _, logger: logger);
+
+            await controller.GetCurrenciesAsync(CancellationToken.None);
+
+            StringAssert.Contains(logger.Lines[1], "more chars)");
+        }
+
+        private static ConversionController Create(HttpStatusCode status, string body, out StubHandler handler, string providers = null, ILogger logger = null)
+        {
+            handler = new StubHandler(status, body);
+            return new ConversionController(new HttpClient(handler), providers, logger);
         }
     }
 }

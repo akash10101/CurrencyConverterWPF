@@ -171,6 +171,57 @@ namespace Challenge.Tests
         }
 
         [TestMethod]
+        public void Initialize_ShowsTheRateForOneUnitAndItsDate()
+        {
+            Assert.AreEqual("1 EUR = 2.00 USD", _viewModel.LatestRateText);
+            StringAssert.StartsWith(_viewModel.LatestDateText, "rate of ");
+        }
+
+        [TestMethod]
+        public void SwapCurrencies_ExchangesSourceAndTarget_WithASingleRefresh()
+        {
+            _viewModel.SwapCurrenciesCommand.Execute(null);
+
+            Assert.AreEqual("USD", _viewModel.SelectedSourceCurrency.Code);
+            Assert.AreEqual("EUR", _viewModel.SelectedTargetCurrency.Code);
+            Assert.AreEqual(2, _controller.LatestCalls, "one request for the swapped pair, not one per currency");
+            Assert.AreEqual(2, _controller.HistoricCalls);
+            Assert.AreEqual("EUR", _viewModel.HistoricRates[0].Currency);
+        }
+
+        [TestMethod]
+        public void InvalidInput_ClearsTheRateLine()
+        {
+            _viewModel.AmountText = "abc";
+
+            Assert.AreEqual(string.Empty, _viewModel.LatestRateText);
+            Assert.AreEqual(string.Empty, _viewModel.LatestDateText);
+        }
+
+        [TestMethod]
+        public async Task EveryButton_IsLogged()
+        {
+            var logger = new RecordingLogger();
+            var viewModel = new MainViewModel(new ExchangeRateService(_controller), () => Today, logger);
+            await viewModel.InitializeAsync();
+
+            viewModel.RefreshCommand.Execute(null);
+            viewModel.ToggleHistoryCommand.Execute(null);
+            viewModel.ToggleHistoryCommand.Execute(null);
+            viewModel.SwapCurrenciesCommand.Execute(null);
+
+            CollectionAssert.AreEqual(
+                new[]
+                {
+                    "Info [MainViewModel] Button clicked: Refresh (amount '1', EUR -> USD, 2024-12-11 to 2025-01-10)",
+                    "Info [MainViewModel] Button clicked: Show Historical data",
+                    "Info [MainViewModel] Button clicked: Hide Historical data",
+                    "Info [MainViewModel] Button clicked: Swap currencies (EUR -> USD becomes USD -> EUR)"
+                },
+                logger.Lines.ToArray());
+        }
+
+        [TestMethod]
         public async Task EmptyTimeFrame_ShowsAnExplanation()
         {
             _controller.History = new Challenge.Models.DailyRate[0];

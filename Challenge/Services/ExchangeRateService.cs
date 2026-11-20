@@ -51,21 +51,4 @@ namespace Challenge.Services
             return currencies.FirstOrDefault(currency => string.Equals(currency.Code, code, StringComparison.OrdinalIgnoreCase));
         }
     }
-
-    /// <summary>The available currencies together with the ones to preselect.</summary>
-    public sealed class CurrencyList
-    {
-        public CurrencyList(IReadOnlyList<CurrencyInfo> all, CurrencyInfo defaultSource, CurrencyInfo defaultTarget)
-        {
-            All = all;
-            DefaultSource = defaultSource;
-            DefaultTarget = defaultTarget;
-        }
-
-        public IReadOnlyList<CurrencyInfo> All { get; }
-
-        public CurrencyInfo DefaultSource { get; }
-
-        public CurrencyInfo DefaultTarget { get; }
-    }
 }

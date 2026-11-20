@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
 using Challenge.Commands;
+using Challenge.Logging;
 using Challenge.Models;
 using Challenge.Services;
 using Challenge.Services.Interfaces;
@@ -24,8 +25,9 @@ namespace Challenge.ViewModels
         private static readonly HistoricRateItem[] NoRates = new HistoricRateItem[0];
 
         private readonly IExchangeRateService _service;
-        private readonly ExclusiveOperationRunner _runner = new ExclusiveOperationRunner();
+        private readonly ExclusiveOperationRunner _runner;
         private readonly Func<DateTime> _today;
+        private readonly ILogger _logger;
 
         private RateSnapshot _rates;
         private string _serviceError;
@@ -39,6 +41,7 @@ namespace Challenge.ViewModels
         private DateTime? _endDate;
 
         private string _latestAmountText = string.Empty;
+        private string _latestRateText = string.Empty;
         private string _latestDateText = string.Empty;
         private IReadOnlyList<HistoricRateItem> _historicRates = NoRates;
         private string _statusMessage = string.Empty;
@@ -46,25 +49,23 @@ namespace Challenge.ViewModels
         private bool _isBusy;
         private bool _isHistoryVisible;
 
-        public MainViewModel(IExchangeRateService service, Func<DateTime> today = null)
+        public MainViewModel(IExchangeRateService service, Func<DateTime> today = null, ILogger logger = null)
         {
             _service = service ?? throw new ArgumentNullException(nameof(service));
             _today = today ?? (() => DateTime.Today);
+            _logger = (logger ?? NullLogger.Instance).ForCategory(nameof(MainViewModel));
+            _runner = new ExclusiveOperationRunner(_logger);
 
             _endDate = _today().Date;
             _startDate = _endDate.Value.AddDays(-DefaultHistoryDays);
 
-            RefreshCommand = new RelayCommand(() =>
-            {
-                _ = _currencies.Count == 0 ? InitializeAsync() : RefreshAsync();
-            });
-
-            ToggleHistoryCommand = new RelayCommand(() => IsHistoryVisible = !IsHistoryVisible);
+            RefreshCommand = new RelayCommand(Refresh);
+            ToggleHistoryCommand = new RelayCommand(ToggleHistory);
+            SwapCurrenciesCommand = new RelayCommand(SwapCurrencies);
         }
 
         // ----- input -----
 
-        /// <summary>What the user typed. Kept as text so invalid input can be reported instead of silently dropped.</summary>
         public string AmountText
         {
             get => _amountText;
@@ -114,7 +115,7 @@ namespace Challenge.ViewModels
             {
                 if (SetProperty(ref _startDate, value))
                 {
-                    OnPropertyChanged(nameof(EndDate)); // the two dates validate each other
+                    OnPropertyChanged(nameof(EndDate)); 
                     _ = RefreshAsync();
                 }
             }
@@ -135,11 +136,16 @@ namespace Challenge.ViewModels
 
         // ----- output -----
 
-        /// <summary>The amount converted with the latest rate.</summary>
         public string LatestAmountText
         {
             get => _latestAmountText;
             private set => SetProperty(ref _latestAmountText, value);
+        }
+
+        public string LatestRateText
+        {
+            get => _latestRateText;
+            private set => SetProperty(ref _latestRateText, value);
         }
 
         public string LatestDateText
@@ -148,7 +154,6 @@ namespace Challenge.ViewModels
             private set => SetProperty(ref _latestDateText, value);
         }
 
-        /// <summary>Converted values for the selected time frame, newest first.</summary>
         public IReadOnlyList<HistoricRateItem> HistoricRates
         {
             get => _historicRates;
@@ -177,7 +182,6 @@ namespace Challenge.ViewModels
 
         // ----- historical data toggle -----
 
-        /// <summary>Whether the list of historic rates is shown. Hidden until the user asks for it.</summary>
         public bool IsHistoryVisible
         {
             get => _isHistoryVisible;
@@ -192,12 +196,49 @@ namespace Challenge.ViewModels
 
         public string HistoryButtonText => _isHistoryVisible ? HideHistoryText : ShowHistoryText;
 
-        /// <summary>Shows the historic rates if they are hidden, hides them if they are shown.</summary>
         public ICommand ToggleHistoryCommand { get; }
 
-        // ----- operations -----
+        public ICommand SwapCurrenciesCommand { get; }
 
-        /// <summary>Loads the currency list, picks default currencies and loads the first set of rates.</summary>
+
+        private void Refresh()
+        {
+            _logger.Info("Button clicked: Refresh (" + DescribeSelection() + ")");
+            _ = _currencies.Count == 0 ? InitializeAsync() : RefreshAsync();
+        }
+
+        private void ToggleHistory()
+        {
+            _logger.Info("Button clicked: " + HistoryButtonText);
+            IsHistoryVisible = !IsHistoryVisible;
+        }
+
+        private void SwapCurrencies()
+        {
+            _logger.Info("Button clicked: Swap currencies (" + CodeOf(_sourceCurrency) + " -> " + CodeOf(_targetCurrency)
+                + " becomes " + CodeOf(_targetCurrency) + " -> " + CodeOf(_sourceCurrency) + ")");
+
+            var source = _sourceCurrency;
+            _sourceCurrency = _targetCurrency;
+            _targetCurrency = source;
+            OnPropertyChanged(nameof(SelectedSourceCurrency));
+            OnPropertyChanged(nameof(SelectedTargetCurrency));
+
+            _ = RefreshAsync();
+        }
+
+        private string DescribeSelection()
+        {
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "amount '{0}', {1} -> {2}, {3:yyyy-MM-dd} to {4:yyyy-MM-dd}",
+                _amountText, CodeOf(_sourceCurrency), CodeOf(_targetCurrency), _startDate, _endDate);
+        }
+
+        private static string CodeOf(CurrencyInfo currency) => currency?.Code ?? "none";
+
+        // ----- operations -----
+      
         public async Task InitializeAsync()
         {
             await RunAsync("Loading currencies...", _service.GetCurrenciesAsync, currencies =>
@@ -213,7 +254,6 @@ namespace Challenge.ViewModels
             await RefreshAsync();
         }
 
-        /// <summary>Fetches the latest and the historic rates for the current selection.</summary>
         public Task RefreshAsync()
         {
             _rates = null;
@@ -236,10 +276,6 @@ namespace Challenge.ViewModels
                 rates => _rates = rates);
         }
 
-        /// <summary>
-        /// Runs a service call through the exclusive runner and reflects its progress and outcome in the UI.
-        /// The outcome of a superseded call is ignored completely.
-        /// </summary>
         private async Task RunAsync<T>(string busyMessage, Func<CancellationToken, Task<T>> operation, Action<T> onSuccess)
         {
             _serviceError = null;
@@ -268,7 +304,9 @@ namespace Challenge.ViewModels
 
         // ----- display -----
 
-        /// <summary>Recomputes everything the user sees from the current inputs, the loaded rates and the last error.</summary>
+        /// <summary>
+        /// Recomputes everything the user sees from the current inputs, the loaded rates and the last error.
+        /// </summary>
         private void UpdateDisplay()
         {
             var validationError = FirstValidationError();
@@ -294,15 +332,20 @@ namespace Challenge.ViewModels
             }
 
             decimal amount;
-            InputValidator.TryParseAmount(_amountText, out amount, out _); // already validated above
+            InputValidator.TryParseAmount(_amountText, out amount, out _);
 
-            LatestAmountText = FormatAmount(amount * _rates.Latest.Rate);
-            LatestDateText = string.Format(CultureInfo.CurrentCulture, "(rate of {0:d})", _rates.Latest.Date);
+            var result = RateCalculator.Convert(_rates, amount);
 
-            HistoricRates = _rates.History
-                .OrderByDescending(day => day.Date)
-                .Select(day => new HistoricRateItem(day.Date, amount * day.Rate, _rates.TargetCode))
-                .ToList();
+            LatestAmountText = FormatAmount(result.LatestAmount);
+            LatestRateText = string.Format(
+                CultureInfo.CurrentCulture,
+                "1 {0} = {1} {2}",
+                _sourceCurrency.Code,
+                result.LatestRate.ToString("#,##0.00####", CultureInfo.CurrentCulture),
+                result.TargetCode);
+            LatestDateText = string.Format(CultureInfo.CurrentCulture, "rate of {0:d}", result.LatestDate);
+
+            HistoricRates = result.History;
 
             ShowStatus(
                 HistoricRates.Count == 0 ? Constants.NoExchangeRateFoundMsg : string.Empty,
@@ -318,6 +361,7 @@ namespace Challenge.ViewModels
         private void ClearResults()
         {
             LatestAmountText = string.Empty;
+            LatestRateText = string.Empty;
             LatestDateText = string.Empty;
             HistoricRates = NoRates;
         }
@@ -354,7 +398,6 @@ namespace Challenge.ViewModels
             }
         }
 
-        /// <summary>The first problem with the current input, in the order the fields appear on screen.</summary>
         private string FirstValidationError()
         {
             return ValidatedProperties.Select(property => this[property]).FirstOrDefault(error => error != null);
